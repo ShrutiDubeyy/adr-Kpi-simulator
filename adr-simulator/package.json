@@ -1,0 +1,10 @@
+{
+  "name": "adr-kpi-simulator",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Synthetic API service for testing ADR Orchestrator KPI workflows",
+  "type": "module",
+  "scripts": {"start":"node src/server.js", "dev":"node --watch src/server.js", "test":"node --test"},
+  "engines": {"node": ">=20"},
+  "dependencies": {"cors":"^2.8.5", "express":"^4.21.2"}
+}
