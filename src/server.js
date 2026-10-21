@@ -1,69 +1,73 @@
+
 import express from 'express';
 import cors from 'cors';
 import crypto from 'node:crypto';
 
 const app = express();
+const PORT = process.env.PORT || 8080;
+
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
 app.use(express.json({ limit: '1mb' }));
 
-const PORT = process.env.PORT || 8080;
 const sessions = new Map();
 
 const now = () => new Date().toISOString();
-const id = (prefix) => `${prefix}_${crypto.randomUUID()}`;
+const makeId = (prefix) => `${prefix}_${crypto.randomUUID()}`;
 
 const scenarios = [
-  { id: 'normal', name: 'Normal operation', description: 'Typical load, valid telemetry and no dispatch event.' },
-  { id: 'success', name: 'Successful demand response', description: 'Dispatch succeeds, demand reduces and evidence is complete.' },
-  { id: 'dispatch_failure', name: 'Dispatch failure', description: 'Dispatch command times out or is rejected.' },
-  { id: 'guardrail_violation', name: 'Guardrail violation attempt', description: 'Unsafe dispatch is blocked and logged.' },
-  { id: 'missing_data', name: 'Missing meter data', description: 'Some intervals are missing or flagged invalid.' },
-  { id: 'revert_failure', name: 'Revert failure', description: 'Event recovery fails and raises an exception.' },
-  { id: 'economic_sensitivity', name: 'Economic sensitivity', description: 'Alternative tariff and cost assumptions.' },
-  { id: 'multi_event', name: 'Multiple live-event simulations', description: 'Create multiple distinct simulated events for KPI testing.' }
+  { id: 'normal', name: 'Normal operation', description: 'Typical load and valid simulated telemetry.' },
+  { id: 'success', name: 'Successful demand response', description: 'Simulated dispatch succeeds with provisional evidence.' },
+  { id: 'dispatch_failure', name: 'Dispatch failure', description: 'Simulated dispatch command fails.' },
+  { id: 'guardrail_violation', name: 'Guardrail violation', description: 'Unsafe simulated dispatch is blocked.' },
+  { id: 'missing_data', name: 'Missing meter data', description: 'Some simulated intervals are missing.' },
+  { id: 'revert_failure', name: 'Revert failure', description: 'Simulated recovery fails.' },
+  { id: 'economic_sensitivity', name: 'Economic sensitivity', description: 'Alternative simulated economic assumptions.' },
+  { id: 'multi_event', name: 'Multiple events', description: 'Multiple simulated demand-response events.' }
 ];
 
-// API-key authentication for simulator endpoints.
-// Configure SIMULATOR_API_KEY in Render environment variables.
-// Send the same value in the X-API-Key request header.
+const SIMULATED = 'SIMULATED';
+const NOT_VERIFIED = 'SIMULATED_NOT_FIELD_VERIFIED';
+
+// Public health endpoint is defined below, outside the protected API prefix.
+// All /api/v1/simulator routes require the configured API key.
 app.use('/api/v1/simulator', (req, res, next) => {
   if (req.method === 'OPTIONS') return next();
 
   const expectedKey = process.env.SIMULATOR_API_KEY;
-  const providedKey = req.get('X-API-Key');
+  const suppliedKey = req.get('X-API-Key');
 
   if (!expectedKey) {
     return res.status(503).json({
       success: false,
       error: {
         code: 'API_KEY_NOT_CONFIGURED',
-        message: 'Simulator API key is not configured on the server'
+        message: 'Simulator API key is not configured on the server.'
       }
     });
   }
 
-  if (!providedKey) {
+  if (!suppliedKey) {
     return res.status(401).json({
       success: false,
       error: {
         code: 'API_KEY_REQUIRED',
-        message: 'Provide the X-API-Key request header'
+        message: 'Provide the X-API-Key request header.'
       }
     });
   }
 
-  const expectedBuffer = Buffer.from(expectedKey, 'utf8');
-  const providedBuffer = Buffer.from(providedKey, 'utf8');
+  const expected = Buffer.from(expectedKey, 'utf8');
+  const supplied = Buffer.from(suppliedKey, 'utf8');
 
   if (
-    expectedBuffer.length !== providedBuffer.length ||
-    !crypto.timingSafeEqual(expectedBuffer, providedBuffer)
+    expected.length !== supplied.length ||
+    !crypto.timingSafeEqual(expected, supplied)
   ) {
     return res.status(401).json({
       success: false,
       error: {
         code: 'INVALID_API_KEY',
-        message: 'The supplied API key is invalid'
+        message: 'The supplied API key is invalid.'
       }
     });
   }
@@ -71,13 +75,14 @@ app.use('/api/v1/simulator', (req, res, next) => {
   next();
 });
 
-function envelope(session, data, metadata = {}) {
+function responseEnvelope(session, data, metadata = {}) {
   return {
     success: true,
     simulationId: session.id,
     scenario: session.scenario,
     generatedAt: now(),
-    sourceType: 'SIMULATED',
+    sourceType: SIMULATED,
+    validationStatus: NOT_VERIFIED,
     data,
     metadata
   };
@@ -91,7 +96,7 @@ function getSession(req, res, next) {
       success: false,
       error: {
         code: 'SESSION_NOT_FOUND',
-        message: 'Simulation session not found. Create a new session if the service restarted.'
+        message: 'Simulation session not found. Create a new session after a service restart.'
       }
     });
   }
@@ -100,27 +105,23 @@ function getSession(req, res, next) {
   next();
 }
 
-function seeded(seed) {
-  let x = (Number(seed) || 42) >>> 0;
-
-  return () => {
-    x = (1664525 * x + 1013904223) >>> 0;
-    return x / 4294967296;
-  };
-}
-
 function createSession(body = {}) {
+  const requestedScenario = String(body.scenario || 'normal');
+
   const session = {
-    id: id('sim'),
+    id: makeId('sim'),
     createdAt: now(),
-    scenario: scenarios.some((item) => item.id === body.scenario)
-      ? body.scenario
+    scenario: scenarios.some((s) => s.id === requestedScenario)
+      ? requestedScenario
       : 'normal',
     seed: Number.isFinite(Number(body.seed)) ? Number(body.seed) : 42,
     intervalMinutes: [5, 15, 30, 60].includes(Number(body.intervalMinutes))
       ? Number(body.intervalMinutes)
       : 15,
-    consumerCount: Math.max(1, Math.min(100, Number(body.consumerCount) || 5)),
+    consumerCount: Math.max(
+      1,
+      Math.min(100, Number(body.consumerCount) || 5)
+    ),
     events: [],
     status: 'ACTIVE'
   };
@@ -129,7 +130,16 @@ function createSession(body = {}) {
   return session;
 }
 
-function consumers(session) {
+function seededRandom(seed) {
+  let value = (Number(seed) || 42) >>> 0;
+
+  return () => {
+    value = (1664525 * value + 1013904223) >>> 0;
+    return value / 4294967296;
+  };
+}
+
+function getConsumers(session) {
   const names = [
     'Marudhar Industries',
     'Central Cold Storage',
@@ -146,19 +156,20 @@ function consumers(session) {
     'Food processing'
   ];
 
-  return Array.from({ length: session.consumerCount }, (_, index) => ({
-    consumerId: `CON-${String(index + 1).padStart(3, '0')}`,
+  return Array.from({ length: session.consumerCount }, (_, i) => ({
+    consumerId: `CON-${String(i + 1).padStart(3, '0')}`,
+    meterId: i === 0 ? '23102045' : `SIM-METER-${String(i + 1).padStart(3, '0')}`,
     siteId: 'SITE-001',
-    name: names[index % names.length],
-    sector: sectors[index % sectors.length],
-    contractDemandKw: 500 + index * 125,
+    name: names[i % names.length],
+    sector: sectors[i % sectors.length],
+    contractDemandKw: 500 + i * 125,
     tariffCategory: 'HT-INDUSTRIAL',
-    dataSource: 'SIMULATED',
-    sourceType: 'SIMULATED'
+    sourceType: SIMULATED,
+    validationStatus: NOT_VERIFIED
   }));
 }
 
-function assets() {
+function getAssets() {
   return [
     {
       assetId: 'AST-CH-01',
@@ -167,9 +178,9 @@ function assets() {
       ratedPowerKw: 180,
       flexibleCapacityKw: 45,
       criticality: 'MEDIUM',
-      comfortLimits: { minC: 22, maxC: 26 },
       controllable: true,
-      sourceType: 'SIMULATED'
+      sourceType: SIMULATED,
+      validationStatus: NOT_VERIFIED
     },
     {
       assetId: 'AST-AHU-01',
@@ -178,9 +189,9 @@ function assets() {
       ratedPowerKw: 75,
       flexibleCapacityKw: 18,
       criticality: 'LOW',
-      comfortLimits: { minC: 22, maxC: 26 },
       controllable: true,
-      sourceType: 'SIMULATED'
+      sourceType: SIMULATED,
+      validationStatus: NOT_VERIFIED
     },
     {
       assetId: 'AST-CMP-01',
@@ -189,9 +200,9 @@ function assets() {
       ratedPowerKw: 120,
       flexibleCapacityKw: 0,
       criticality: 'HIGH',
-      comfortLimits: null,
       controllable: false,
-      sourceType: 'SIMULATED'
+      sourceType: SIMULATED,
+      validationStatus: NOT_VERIFIED
     },
     {
       assetId: 'AST-FAN-01',
@@ -200,139 +211,209 @@ function assets() {
       ratedPowerKw: 40,
       flexibleCapacityKw: 10,
       criticality: 'LOW',
-      comfortLimits: null,
       controllable: true,
-      sourceType: 'SIMULATED'
+      sourceType: SIMULATED,
+      validationStatus: NOT_VERIFIED
     }
   ];
 }
 
-function meterReadings(session, query = {}) {
-  const rng = seeded(session.seed);
-  const count = Math.min(2000, Math.max(1, Number(query.limit) || 96));
-  const start = new Date(
-    query.from || Date.now() - count * session.intervalMinutes * 60000
+function buildReadings({
+  meterId = '23102045',
+  start = new Date(Date.now() - 24 * 60 * 60 * 1000),
+  end = new Date(),
+  intervalMinutes = 15,
+  seed = 42,
+  scenario = 'normal',
+  limit = 672
+} = {}) {
+  const startDate = new Date(start);
+  const endDate = new Date(end);
+
+  if (
+    Number.isNaN(startDate.getTime()) ||
+    Number.isNaN(endDate.getTime()) ||
+    endDate < startDate
+  ) {
+    return null;
+  }
+
+  const random = seededRandom(seed);
+  const intervalMs = intervalMinutes * 60 * 1000;
+  const count = Math.min(
+    limit,
+    Math.floor((endDate.getTime() - startDate.getTime()) / intervalMs) + 1
   );
 
-  const output = [];
+  const readings = [];
 
-  for (let index = 0; index < count; index++) {
-    const timestamp = new Date(
-      start.getTime() + index * session.intervalMinutes * 60000
-    );
-
+  for (let i = 0; i < count; i++) {
+    const timestamp = new Date(startDate.getTime() + i * intervalMs);
     const hour = timestamp.getHours() + timestamp.getMinutes() / 60;
-    const peak = hour >= 12 && hour <= 18
-      ? 1.25
-      : hour >= 8 && hour < 12
-        ? 1.05
-        : 0.72;
 
-    let kw = 310 * peak + Math.sin(index / 5) * 22 + (rng() - 0.5) * 12;
+    const peakFactor =
+      hour >= 12 && hour < 19 ? 1.25 :
+      hour >= 8 && hour < 12 ? 1.05 :
+      0.72;
+
+    let powerKw =
+      286.4 * peakFactor +
+      Math.sin(i / 5) * 8 +
+      (random() - 0.5) * 6;
+
     let qualityStatus = 'VALID';
 
-    if (session.scenario === 'missing_data' && index % 17 === 0) {
+    if (scenario === 'missing_data' && i % 17 === 0) {
+      powerKw = null;
       qualityStatus = 'MISSING';
-      kw = null;
     }
 
-    output.push({
-      readingId: `RD-${session.seed}-${index + 1}`,
-      consumerId: 'CON-001',
-      siteId: 'SITE-001',
+    const energyKwh = powerKw === null
+      ? null
+      : Number((powerKw * intervalMinutes / 60).toFixed(3));
+
+    readings.push({
+      readingId: `RD-${seed}-${i + 1}`,
+      meterId: String(meterId),
+      meterID: String(meterId),
       timestamp: timestamp.toISOString(),
-      intervalMinutes: session.intervalMinutes,
-      powerKw: kw === null ? null : Number(kw.toFixed(2)),
-      energyKwh: kw === null
-        ? null
-        : Number((kw * session.intervalMinutes / 60).toFixed(3)),
+      readingTime: timestamp.toISOString(),
+      intervalMinutes,
+      powerKw: powerKw === null ? null : Number(powerKw.toFixed(2)),
+      activePowerKw: powerKw === null ? null : Number(powerKw.toFixed(2)),
+      energyKwh,
+      kWh: energyKwh,
+      voltage: 415.2,
+      voltageV: 415.2,
+      current: 398.5,
+      currentA: 398.5,
+      frequencyHz: 50,
+      powerFactor: 0.96,
       qualityStatus,
       unitPower: 'kW',
       unitEnergy: 'kWh',
-      sourceType: 'SIMULATED',
-      validationStatus: 'SIMULATED_NOT_FIELD_VERIFIED'
+      sourceType: SIMULATED,
+      validationStatus: NOT_VERIFIED
     });
   }
 
-  return output;
+  return readings;
 }
 
-function forecasts(session) {
-  const rng = seeded(session.seed + 1);
+function getSessionReadings(session, query = {}) {
+  const limit = Math.min(2000, Math.max(1, Number(query.limit) || 96));
+  const start = query.from || query.startTime ||
+    new Date(Date.now() - limit * session.intervalMinutes * 60000);
 
-  return Array.from({ length: 24 }, (_, index) => {
+  const end = query.endTime || new Date(
+    new Date(start).getTime() +
+    (limit - 1) * session.intervalMinutes * 60000
+  );
+
+  return buildReadings({
+    meterId: query.meterID || query.meterId || '23102045',
+    start,
+    end,
+    intervalMinutes: session.intervalMinutes,
+    seed: session.seed,
+    scenario: session.scenario,
+    limit
+  }) || [];
+}
+
+function getForecasts(session) {
+  const random = seededRandom(session.seed + 1);
+
+  return Array.from({ length: 24 }, (_, i) => {
     const timestamp = new Date();
-    timestamp.setHours(index, 0, 0, 0);
+    timestamp.setHours(i, 0, 0, 0);
 
-    const kw = 310
-      + (index >= 12 && index <= 18 ? 90 : 0)
-      + Math.sin(index / 3) * 20
-      + (rng() - 0.5) * 10;
+    const predictedPowerKw =
+      310 +
+      (i >= 12 && i <= 18 ? 90 : 0) +
+      Math.sin(i / 3) * 20 +
+      (random() - 0.5) * 10;
 
     return {
-      forecastId: `FC-${session.seed}-${index + 1}`,
+      forecastId: `FC-${session.seed}-${i + 1}`,
       siteId: 'SITE-001',
       timestamp: timestamp.toISOString(),
-      predictedPowerKw: Number(kw.toFixed(2)),
-      lowerBoundKw: Number((kw - 18).toFixed(2)),
-      upperBoundKw: Number((kw + 18).toFixed(2)),
+      predictedPowerKw: Number(predictedPowerKw.toFixed(2)),
+      lowerBoundKw: Number((predictedPowerKw - 18).toFixed(2)),
+      upperBoundKw: Number((predictedPowerKw + 18).toFixed(2)),
       modelVersion: 'sim-1.0',
-      sourceType: 'SIMULATED',
-      validationStatus: 'SIMULATED_NOT_FIELD_VERIFIED'
+      sourceType: SIMULATED,
+      validationStatus: NOT_VERIFIED
     };
   });
 }
 
-function eventMv(session, event) {
-  const baseline = 320;
-  const reduction = session.scenario === 'success'
+function calculateEventMv(session, event) {
+  const baselinePowerKw = 320;
+
+  const reliefKw = session.scenario === 'success'
     ? 32
     : session.scenario === 'guardrail_violation'
       ? 0
       : 12;
 
-  const actual = baseline - reduction;
-  const valid = session.scenario !== 'missing_data';
+  const hasValidData = session.scenario !== 'missing_data';
+  const actualPowerKw = baselinePowerKw - reliefKw;
 
   return {
     eventId: event.eventId,
     baselineMethod: 'SIMULATED_FIXED_BASELINE_V1',
-    baselinePowerKw: baseline,
-    actualPowerKw: actual,
-    reliefKw: valid ? Number((baseline - actual).toFixed(2)) : null,
-    reliefPercent: valid
-      ? Number(((baseline - actual) / baseline * 100).toFixed(2))
+    baselinePowerKw,
+    actualPowerKw,
+    reliefKw: hasValidData ? reliefKw : null,
+    reliefPercent: hasValidData
+      ? Number((reliefKw / baselinePowerKw * 100).toFixed(2))
       : null,
-    energyReductionKwh: valid
-      ? Number((reduction * (event.durationMinutes || 60) / 60).toFixed(2))
+    energyReductionKwh: hasValidData
+      ? Number((reliefKw * (event.durationMinutes || 60) / 60).toFixed(2))
       : null,
-    reboundEnergyKwh: valid ? 4.5 : null,
-    dataQuality: valid ? 'VALID' : 'INCOMPLETE',
-    evidenceStatus: valid ? 'PROVISIONAL' : 'INCOMPLETE',
-    validationStatus: 'SIMULATED_NOT_FIELD_VERIFIED',
-    sourceType: 'SIMULATED'
+    dataQuality: hasValidData ? 'VALID' : 'INCOMPLETE',
+    evidenceStatus: hasValidData ? 'PROVISIONAL' : 'INCOMPLETE',
+    sourceType: SIMULATED,
+    validationStatus: NOT_VERIFIED
   };
 }
 
-// Health endpoint intentionally remains public.
+function findSessionEvent(session, eventId) {
+  return session.events.find((event) => event.eventId === eventId);
+}
+
+function parseDate(value, fallback) {
+  if (!value) return fallback;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+// -----------------------------------------------------------------------------
+// Public health endpoint
+// -----------------------------------------------------------------------------
+
 app.get('/health', (req, res) => {
   res.json({
     success: true,
     service: 'adr-kpi-simulator',
     status: 'ok',
     version: '1.0.0',
-    sourceType: 'SIMULATED',
+    sourceType: SIMULATED,
     timestamp: now()
   });
 });
 
-// A protected base route for integrations that test the configured base URL.
+// -----------------------------------------------------------------------------
+// Protected API root and scenarios
+// -----------------------------------------------------------------------------
+
 app.get('/api/v1/simulator', (req, res) => {
   res.json({
     success: true,
     service: 'adr-kpi-simulator',
     status: 'ok',
-    sourceType: 'SIMULATED',
+    sourceType: SIMULATED,
     availableEndpoints: [
       '/scenarios',
       '/sessions',
@@ -342,7 +423,11 @@ app.get('/api/v1/simulator', (req, res) => {
       '/sessions/:id/meter-readings',
       '/sessions/:id/forecasts',
       '/sessions/:id/events',
-      '/sessions/:id/economics'
+      '/sessions/:id/economics',
+      '/metering/readings/latest/:meterID',
+      '/metering/readings/interval',
+      '/metering/events/:meterID',
+      '/billing/cycle-data/:meterID'
     ]
   });
 });
@@ -350,27 +435,29 @@ app.get('/api/v1/simulator', (req, res) => {
 app.get('/api/v1/simulator/scenarios', (req, res) => {
   res.json({
     success: true,
-    sourceType: 'SIMULATED',
+    sourceType: SIMULATED,
     data: scenarios
   });
 });
 
+// -----------------------------------------------------------------------------
+// Session management
+// -----------------------------------------------------------------------------
+
 app.post('/api/v1/simulator/sessions', (req, res) => {
   const session = createSession(req.body || {});
 
-  res.status(201).json(
-    envelope(session, {
-      session: {
-        id: session.id,
-        scenario: session.scenario,
-        seed: session.seed,
-        intervalMinutes: session.intervalMinutes,
-        consumerCount: session.consumerCount,
-        status: session.status,
-        createdAt: session.createdAt
-      }
-    })
-  );
+  res.status(201).json(responseEnvelope(session, {
+    session: {
+      id: session.id,
+      scenario: session.scenario,
+      seed: session.seed,
+      intervalMinutes: session.intervalMinutes,
+      consumerCount: session.consumerCount,
+      status: session.status,
+      createdAt: session.createdAt
+    }
+  }));
 });
 
 app.get('/api/v1/simulator/sessions/:id', (req, res) => {
@@ -381,12 +468,12 @@ app.get('/api/v1/simulator/sessions/:id', (req, res) => {
       success: false,
       error: {
         code: 'SESSION_NOT_FOUND',
-        message: 'Simulation session not found'
+        message: 'Simulation session not found.'
       }
     });
   }
 
-  res.json(envelope(session, {
+  res.json(responseEnvelope(session, {
     session: {
       id: session.id,
       scenario: session.scenario,
@@ -402,23 +489,26 @@ app.get('/api/v1/simulator/sessions/:id', (req, res) => {
 
 app.post('/api/v1/simulator/sessions/:id/reset', getSession, (req, res) => {
   req.session.events = [];
-  res.json(envelope(req.session, { reset: true, eventCount: 0 }));
+  res.json(responseEnvelope(req.session, {
+    reset: true,
+    eventCount: 0
+  }));
 });
 
 app.get('/api/v1/simulator/sessions/:id/consumers', getSession, (req, res) => {
-  const data = consumers(req.session);
-  res.json(envelope(req.session, data, { count: data.length }));
+  const data = getConsumers(req.session);
+  res.json(responseEnvelope(req.session, data, { count: data.length }));
 });
 
 app.get('/api/v1/simulator/sessions/:id/assets', getSession, (req, res) => {
-  const data = assets();
-  res.json(envelope(req.session, data, { count: data.length }));
+  const data = getAssets();
+  res.json(responseEnvelope(req.session, data, { count: data.length }));
 });
 
 app.get('/api/v1/simulator/sessions/:id/meter-readings', getSession, (req, res) => {
-  const data = meterReadings(req.session, req.query);
+  const data = getSessionReadings(req.session, req.query);
 
-  res.json(envelope(req.session, data, {
+  res.json(responseEnvelope(req.session, data, {
     count: data.length,
     intervalMinutes: req.session.intervalMinutes,
     units: { power: 'kW', energy: 'kWh' }
@@ -426,15 +516,20 @@ app.get('/api/v1/simulator/sessions/:id/meter-readings', getSession, (req, res) 
 });
 
 app.get('/api/v1/simulator/sessions/:id/forecasts', getSession, (req, res) => {
-  const data = forecasts(req.session);
-  res.json(envelope(req.session, data, {
+  const data = getForecasts(req.session);
+
+  res.json(responseEnvelope(req.session, data, {
     count: data.length,
     units: { power: 'kW' }
   }));
 });
 
+// -----------------------------------------------------------------------------
+// Demand-response events and M&V
+// -----------------------------------------------------------------------------
+
 app.get('/api/v1/simulator/sessions/:id/events', getSession, (req, res) => {
-  res.json(envelope(req.session, req.session.events, {
+  res.json(responseEnvelope(req.session, req.session.events, {
     count: req.session.events.length
   }));
 });
@@ -443,7 +538,7 @@ app.post('/api/v1/simulator/sessions/:id/events', getSession, (req, res) => {
   const body = req.body || {};
 
   const event = {
-    eventId: id('evt'),
+    eventId: makeId('evt'),
     siteId: body.siteId || 'SITE-001',
     targetReductionKw: Math.max(0, Number(body.targetReductionKw) || 25),
     startTime: body.startTime || now(),
@@ -454,11 +549,13 @@ app.post('/api/v1/simulator/sessions/:id/events', getSession, (req, res) => {
     eventStatus: 'PLANNED',
     dispatchStatus: 'NOT_ATTEMPTED',
     createdAt: now(),
-    sourceType: 'SIMULATED'
+    sourceType: SIMULATED,
+    validationStatus: NOT_VERIFIED
   };
 
   req.session.events.push(event);
-  res.status(201).json(envelope(req.session, event));
+
+  res.status(201).json(responseEnvelope(req.session, event));
 });
 
 app.post(
@@ -466,48 +563,48 @@ app.post(
   getSession,
   (req, res) => {
     const session = req.session;
-    const event = session.events.find(
-      (item) => item.eventId === req.params.eventId
-    );
+    const event = findSessionEvent(session, req.params.eventId);
 
     if (!event) {
       return res.status(404).json({
         success: false,
         error: {
           code: 'EVENT_NOT_FOUND',
-          message: 'Event not found in this session'
+          message: 'Event not found in this session.'
         }
       });
     }
 
     const scenario = session.scenario;
-    const failed = scenario === 'dispatch_failure';
-    const violation = scenario === 'guardrail_violation';
+    const dispatchFailed = scenario === 'dispatch_failure';
+    const guardrailBlocked = scenario === 'guardrail_violation';
     const revertFailed = scenario === 'revert_failure';
 
-    event.eventStatus = failed
+    event.eventStatus = dispatchFailed
       ? 'FAILED'
-      : violation
+      : guardrailBlocked
         ? 'BLOCKED'
         : 'COMPLETED';
 
-    event.dispatchStatus = failed
+    event.dispatchStatus = dispatchFailed
       ? 'TIMEOUT'
-      : violation
+      : guardrailBlocked
         ? 'BLOCKED_BY_GUARDRAIL'
         : 'ACKNOWLEDGED';
 
-    event.guardrailStatus = violation ? 'VIOLATION_BLOCKED' : 'WITHIN_LIMITS';
+    event.guardrailStatus = guardrailBlocked
+      ? 'VIOLATION_BLOCKED'
+      : 'WITHIN_LIMITS';
+
     event.overrideActivated = false;
     event.revertStatus = revertFailed ? 'FAILED' : 'SUCCEEDED';
     event.executedAt = now();
-    event.validationStatus = 'SIMULATED_NOT_FIELD_VERIFIED';
-    event.mv = eventMv(session, event);
+    event.mv = calculateEventMv(session, event);
     event.evidenceStatus = scenario === 'missing_data'
       ? 'INCOMPLETE'
       : 'PROVISIONAL';
 
-    res.json(envelope(session, event));
+    res.json(responseEnvelope(session, event));
   }
 );
 
@@ -515,46 +612,206 @@ app.get(
   '/api/v1/simulator/sessions/:id/events/:eventId/mv',
   getSession,
   (req, res) => {
-    const event = req.session.events.find(
-      (item) => item.eventId === req.params.eventId
-    );
+    const event = findSessionEvent(req.session, req.params.eventId);
 
     if (!event) {
       return res.status(404).json({
         success: false,
         error: {
           code: 'EVENT_NOT_FOUND',
-          message: 'Event not found in this session'
+          message: 'Event not found in this session.'
         }
       });
     }
 
-    res.json(envelope(
+    res.json(responseEnvelope(
       req.session,
-      event.mv || eventMv(req.session, event)
+      event.mv || calculateEventMv(req.session, event)
     ));
   }
 );
 
 app.get('/api/v1/simulator/sessions/:id/economics', getSession, (req, res) => {
-  const session = req.session;
-  const factor = session.scenario === 'economic_sensitivity' ? 1.25 : 1;
+  const sensitivity =
+    req.session.scenario === 'economic_sensitivity' ? 1.25 : 1;
 
-  res.json(envelope(session, {
+  res.json(responseEnvelope(req.session, {
     tariffId: 'TARIFF-SIM-01',
     currency: 'INR',
-    peakRatePerKwh: Number((9.5 * factor).toFixed(2)),
+    peakRatePerKwh: Number((9.5 * sensitivity).toFixed(2)),
     offPeakRatePerKwh: 5.2,
-    avoidedCostPerKwh: Number((7.8 * factor).toFixed(2)),
+    avoidedCostPerKwh: Number((7.8 * sensitivity).toFixed(2)),
     integrationCostInr: 150000,
     annualOperatingCostInr: 60000,
     programmeCostInr: 210000,
     assumptionStatus: 'SIMULATED_ASSUMPTIONS_ONLY',
-    sourceType: 'SIMULATED'
+    sourceType: SIMULATED,
+    validationStatus: NOT_VERIFIED
   }));
 });
 
-// JSON response for unknown routes.
+// -----------------------------------------------------------------------------
+// MDMS compatibility: latest reading
+// GET /metering/readings/latest/:meterID
+// -----------------------------------------------------------------------------
+
+app.get(
+  '/api/v1/simulator/metering/readings/latest/:meterID',
+  (req, res) => {
+    const meterID = req.params.meterID;
+    const timestamp = now();
+
+    const reading = {
+      readingId: `MDMS-${meterID}-${Date.now()}`,
+      meterId: meterID,
+      meterID,
+      timestamp,
+      readingTime: timestamp,
+      activeEnergyKwh: 12543.75,
+      energyKwh: 12543.75,
+      kWh: 12543.75,
+      powerKw: 286.4,
+      activePowerKw: 286.4,
+      voltage: 415.2,
+      voltageV: 415.2,
+      current: 398.5,
+      currentA: 398.5,
+      frequencyHz: 50,
+      powerFactor: 0.96,
+      unit: 'kWh',
+      qualityStatus: 'SIMULATED',
+      sourceType: SIMULATED,
+      validationStatus: NOT_VERIFIED
+    };
+
+    res.json({
+      success: true,
+      sourceType: SIMULATED,
+      validationStatus: NOT_VERIFIED,
+      meterId: meterID,
+      data: reading,
+      reading
+    });
+  }
+);
+
+// -----------------------------------------------------------------------------
+// MDMS compatibility: interval/load profile
+// GET /metering/readings/interval?meterID=...&startTime=...&endTime=...
+// -----------------------------------------------------------------------------
+
+app.get('/api/v1/simulator/metering/readings/interval', (req, res) => {
+  const meterID = String(
+    req.query.meterID || req.query.meterId || '23102045'
+  );
+
+  const start = parseDate(
+    req.query.startTime || req.query.from,
+    new Date(Date.now() - 24 * 60 * 60 * 1000)
+  );
+
+  const end = parseDate(
+    req.query.endTime || req.query.to,
+    new Date()
+  );
+
+  if (!start || !end || end < start) {
+    return res.status(400).json({
+      success: false,
+      error: {
+        code: 'INVALID_DATE_RANGE',
+        message: 'Provide valid startTime and endTime values.'
+      }
+    });
+  }
+
+  const readings = buildReadings({
+    meterId: meterID,
+    start,
+    end,
+    intervalMinutes: 15,
+    seed: 42,
+    scenario: 'normal',
+    limit: 672
+  });
+
+  res.json({
+    success: true,
+    sourceType: SIMULATED,
+    validationStatus: NOT_VERIFIED,
+    meterId: meterID,
+    intervalMinutes: 15,
+    count: readings.length,
+    data: readings,
+    readings
+  });
+});
+
+// -----------------------------------------------------------------------------
+// MDMS compatibility: meter events
+// GET /metering/events/:meterID
+// -----------------------------------------------------------------------------
+
+app.get('/api/v1/simulator/metering/events/:meterID', (req, res) => {
+  const meterID = req.params.meterID;
+
+  const events = [
+    {
+      eventId: 'SIM-EVENT-001',
+      meterId: meterID,
+      timestamp: now(),
+      eventType: 'DEMAND_RESPONSE_TEST',
+      description: 'Synthetic simulator event',
+      status: 'SIMULATED',
+      sourceType: SIMULATED,
+      validationStatus: NOT_VERIFIED
+    }
+  ];
+
+  res.json({
+    success: true,
+    sourceType: SIMULATED,
+    meterId: meterID,
+    count: events.length,
+    data: events,
+    events
+  });
+});
+
+// -----------------------------------------------------------------------------
+// MDMS compatibility: billing-cycle snapshot
+// GET /billing/cycle-data/:meterID
+// -----------------------------------------------------------------------------
+
+app.get('/api/v1/simulator/billing/cycle-data/:meterID', (req, res) => {
+  const meterID = req.params.meterID;
+
+  const billing = {
+    meterId: meterID,
+    billingPeriod: new Date().toISOString().slice(0, 7),
+    energyConsumedKwh: 12543.75,
+    peakDemandKw: 286.4,
+    estimatedAmountInr: 108250.50,
+    currency: 'INR',
+    billingStatus: 'SIMULATED_ESTIMATE',
+    sourceType: SIMULATED,
+    validationStatus: NOT_VERIFIED
+  };
+
+  res.json({
+    success: true,
+    sourceType: SIMULATED,
+    meterId: meterID,
+    data: billing,
+    billing
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Unknown routes
+// Keep this LAST so it does not intercept valid routes.
+// -----------------------------------------------------------------------------
+
 app.use((req, res) => {
   res.status(404).json({
     success: false,
@@ -565,19 +822,19 @@ app.use((req, res) => {
   });
 });
 
-// JSON response for unexpected errors.
+// Error handler
 app.use((err, req, res, next) => {
-  console.error(err);
+  console.error('Simulator error:', err);
 
   res.status(500).json({
     success: false,
     error: {
       code: 'INTERNAL_ERROR',
-      message: 'Unexpected simulator error'
+      message: 'Unexpected simulator error.'
     }
   });
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`ADR simulator listening on ${PORT}`);
+  console.log(`ADR KPI Simulator listening on port ${PORT}`);
 });
